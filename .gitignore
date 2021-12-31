@@ -5,3 +5,6 @@
 #ignore .out files
 
 *.out
+
+#ignore vs config files
+.vscode
