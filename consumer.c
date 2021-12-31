@@ -1,19 +1,13 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/types.h>
+#include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/signal.h>
 #include <stdbool.h>
 #include <time.h>
 
-#define N 10
-int shm_id, count, empty, mutex;
-
-void consume_item(int item)
-{
-    printf("Consumer: Consuming item %d\n", item);
-}
+int buffer_size, shm_id, count, empty;
 
 typedef union semaphore_t
 {
@@ -24,13 +18,42 @@ typedef union semaphore_t
     void *__pad;
 } semaphore_t;
 
+key_t generate_key(int seed)
+{
+    return ftok("KeyFile", seed);
+}
+
+void get_buffer_size()
+{
+    int msg_id = msgget(generate_key(-1), IPC_CREAT | 0666);
+    if (msg_id == -1)
+    {
+        perror("Error getting message queue");
+        exit(-1);
+    }
+
+    if (msgrcv(msg_id, &buffer_size, sizeof(int), 0, !IPC_NOWAIT) == -1)
+    {
+        perror("Error getting buffer size");
+        exit(-1);
+    }
+
+    if (msgctl(msg_id, IPC_RMID, NULL) == -1)
+    {
+        perror("Error removing message queue");
+        exit(-1);
+    }
+
+    printf("Buffer size %d received\n", buffer_size);
+}
+
 int get_semaphore(key_t sem_key)
 {
     int sem_id = semget(sem_key, 1, IPC_CREAT | 0666);
 
     if (sem_id == -1)
     {
-        perror("Error creating semaphore");
+        perror("Error getting semaphore");
         exit(-1);
     }
 
@@ -60,39 +83,16 @@ void up(int sem_id)
 {
     do_sem_op(1, sem_id);
 }
-
-void clear_resources()
+void consume_item(int *index, int *buffer)
 {
-    if (shmctl(shm_id, IPC_RMID, NULL) == -1)
+    while (buffer[*index] == -1 && *index < buffer_size)
+        ++(*index);
+    if (*index < buffer_size)
     {
-        perror("Error clearing shared memory");
-        exit(-1);
+        printf("Consumer: Consuming item %d\n", buffer[*index]);
+        buffer[*index] = -1;
     }
-
-    if (semctl(mutex, 0, IPC_RMID) == -1)
-    {
-        perror("Error clearing mutex semaphore");
-        exit(-1);
-    }
-
-    if (semctl(empty, 0, IPC_RMID) == -1)
-    {
-        perror("Error clearing empty semaphore");
-        exit(-1);
-    }
-
-    if (semctl(count, 0, IPC_RMID) == -1)
-    {
-        perror("Error clearing count semaphore");
-        exit(-1);
-    }
-
-    exit(0);
-}
-
-key_t generate_key(int seed)
-{
-    return ftok("KeyFile", seed);
+    *index = (*index + 1) % buffer_size;
 }
 
 int main(int argc, char *argv[])
@@ -103,12 +103,19 @@ int main(int argc, char *argv[])
         exit(-1);
     }
 
-    int period = 1000 / atoi(argv[1]);
-    // This is the number of milliseconds between each consumption
+    int period = (1e9 - 1) / atoi(argv[1]);
+    // This is the number of nanoseconds between each consumption
 
-    signal(SIGINT, clear_resources);
+    get_buffer_size();
 
-    shm_id = shmget(generate_key(0), N * sizeof(int), IPC_CREAT | 0666);
+    shm_id = shmget(generate_key(0), buffer_size * sizeof(int), IPC_CREAT | 0666);
+    if (shm_id == -1)
+    {
+        perror("Error getting shared memory");
+        exit(-1);
+    }
+
+    int *buffer = shmat(shm_id, NULL, 0);
     // This is the shared memory segment that will be used to store the items
 
     count = get_semaphore(generate_key(1));
@@ -117,34 +124,19 @@ int main(int argc, char *argv[])
     empty = get_semaphore(generate_key(2));
     // This is the semaphore that will be used to keep track of the number of empty spaces in the buffer
 
-    mutex = get_semaphore(generate_key(3));
-    // This is the semaphore that will be used to control access to the buffer
-
     printf("Semaphore %d is count semaphore\n", count);
     printf("Semaphore %d is empty semaphore\n", empty);
-    printf("Semaphore %d is mutex semaphore\n", mutex);
 
-    // last production time
-    time_t last_time = time(NULL);
-    period = 1;
-
+    int c_pointer = 0;
     while (true)
     {
-        time_t current_time = time(NULL);
-        if (current_time - last_time < period)
-            continue;
-
-        last_time = current_time;
-
         down(count);
-        down(mutex);
 
-        int *buffer = shmat(shm_id, NULL, 0);
-        int index = semctl(count, 0, GETVAL);
-        consume_item(buffer[index]);
+        consume_item(&c_pointer, buffer);
 
-        up(mutex);
         up(empty);
+
+        nanosleep(&(struct timespec){0, period}, NULL);
     }
 
     return 0;

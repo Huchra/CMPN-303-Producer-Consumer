@@ -1,23 +1,13 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/types.h>
+#include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/signal.h>
 #include <stdbool.h>
 #include <time.h>
 
-#define N 10
-int shm_id, count, empty, mutex;
-int sequence = -1;
-
-int produce_item()
-{
-    // sequence = (sequence + 1) % N;
-    sequence++;
-    printf("Producer: Producing item %d\n", sequence);
-    return sequence;
-}
+int buffer_size, shm_id, count, empty, sequence = -1;
 
 typedef union semaphore_t
 {
@@ -28,6 +18,52 @@ typedef union semaphore_t
     void *__pad;
 } semaphore_t;
 
+void clear_resources()
+{
+    if (shmctl(shm_id, IPC_RMID, NULL) == -1)
+    {
+        perror("Error clearing shared memory");
+        exit(-1);
+    }
+
+    if (semctl(empty, 0, IPC_RMID) == -1)
+    {
+        perror("Error clearing empty semaphore");
+        exit(-1);
+    }
+
+    if (semctl(count, 0, IPC_RMID) == -1)
+    {
+        perror("Error clearing count semaphore");
+        exit(-1);
+    }
+
+    exit(0);
+}
+
+key_t generate_key(int seed)
+{
+    return ftok("KeyFile", seed);
+}
+
+void send_buffer_size()
+{
+    int msg_id = msgget(generate_key(-1), IPC_CREAT | 0666);
+    if (msg_id == -1)
+    {
+        perror("Error getting message queue");
+        exit(-1);
+    }
+
+    if (msgsnd(msg_id, &buffer_size, sizeof(int), !IPC_NOWAIT) == -1)
+    {
+        perror("Error sending buffer size");
+        exit(-1);
+    }
+
+    printf("Buffer size %d sent\n", buffer_size);
+}
+
 int create_semaphore(key_t sem_key, int initial_value)
 {
     semaphore_t sem;
@@ -36,7 +72,7 @@ int create_semaphore(key_t sem_key, int initial_value)
 
     if (sem_id == -1)
     {
-        perror("Error creating semaphore");
+        perror("Error getting semaphore");
         exit(-1);
     }
 
@@ -74,101 +110,69 @@ void up(int sem_id)
     do_sem_op(1, sem_id);
 }
 
-void clear_resources()
+int produce_item()
 {
-    if (shmctl(shm_id, IPC_RMID, NULL) == -1)
-    {
-        perror("Error clearing shared memory");
-        exit(-1);
-    }
-
-    if (semctl(mutex, 0, IPC_RMID) == -1)
-    {
-        perror("Error clearing mutex semaphore");
-        exit(-1);
-    }
-
-    if (semctl(empty, 0, IPC_RMID) == -1)
-    {
-        perror("Error clearing empty semaphore");
-        exit(-1);
-    }
-
-    if (semctl(count, 0, IPC_RMID) == -1)
-    {
-        perror("Error clearing count semaphore");
-        exit(-1);
-    }
-
-    exit(0);
-}
-
-key_t generate_key(int seed)
-{
-    return ftok("KeyFile", seed);
+    // sequence = (sequence + 1) % N;
+    sequence++;
+    printf("Producer: Producing item %d\n", sequence);
+    return sequence;
 }
 
 int main(int argc, char *argv[])
 {
-    if (argc != 2)
+    if (argc != 3)
     {
-        fprintf(stderr, "Incorrect usage, to run use: %s <production rate>\n", argv[0]);
+        fprintf(stderr, "Incorrect usage, to run use: %s <production rate>, <buffer size>\n", argv[0]);
         exit(-1);
     }
 
-    int period = 1000 / atoi(argv[1]);
-    // This is the number of milliseconds between each production
+    int period = (1e9 - 1) / atoi(argv[1]);
+    // This is the number of nanoseconds between each production
+
+    buffer_size = atoi(argv[2]);
+    send_buffer_size(buffer_size);
+    // Sending the buffer size to the consumer
 
     signal(SIGINT, clear_resources);
 
-    shm_id = shmget(generate_key(0), N * sizeof(int), IPC_CREAT | 0666);
+    shm_id = shmget(generate_key(0), buffer_size * sizeof(int), IPC_CREAT | 0666);
+    if (shm_id == -1)
+    {
+        perror("Error getting shared memory");
+        exit(-1);
+    }
+
+    int *buffer = shmat(shm_id, NULL, 0);
     // This is the shared memory segment that will be used to store the items
 
     count = create_semaphore(generate_key(1), 0);
     // This is the semaphore that will be used to keep track of the number of items in the buffer
 
-    empty = create_semaphore(generate_key(2), N);
+    empty = create_semaphore(generate_key(2), buffer_size);
     // This is the semaphore that will be used to keep track of the number of empty spaces in the buffer
-
-    mutex = create_semaphore(generate_key(3), 2);
-    // This is the semaphore that will be used to control access to the buffer
 
     printf("Semaphore %d is count semaphore\n", count);
     printf("Semaphore %d is empty semaphore\n", empty);
-    printf("Semaphore %d is mutex semaphore\n", mutex);
 
-    struct timespec current_time;
-    clock_gettime(CLOCK_MONOTONIC, &current_time);
-
-    // last production time
-    struct timespec last_time = current_time;
+    // Initialize all buffer values to -1
+    for (int i = 0; i < buffer_size; ++i)
+        buffer[i] = -1;
 
     while (true)
     {
-        clock_gettime(CLOCK_MONOTONIC, &current_time);
-
-        if (true /** time compare **/)
-            continue;
-
-        last_time = current_time;
-
         down(empty);
-        down(mutex);
 
         int item = produce_item();
-        int *buffer = shmat(shm_id, NULL, 0);
+        buffer[sequence % buffer_size] = item;
 
-        int index = semctl(count, 0, GETVAL);
-        buffer[index] = item;
-
-        // print out buffer
-        for (int i = 0; i < N; i++)
+        // Print out buffer
+        for (int i = 0; i < buffer_size; i++)
             printf("%d ", buffer[i]);
         printf("\n");
 
-        up(mutex);
         up(count);
-    }
 
+        nanosleep(&(struct timespec){0, period}, NULL);
+    }
     return 0;
 }
