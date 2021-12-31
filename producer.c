@@ -137,14 +137,17 @@ int main(int argc, char *argv[])
     printf("Semaphore %d is empty semaphore\n", empty);
     printf("Semaphore %d is mutex semaphore\n", mutex);
 
+    struct timespec current_time;
+    clock_gettime(CLOCK_MONOTONIC, &current_time);
+
     // last production time
-    time_t last_time = time(NULL);
-    period = 1;
+    struct timespec last_time = current_time;
 
     while (true)
     {
-        time_t current_time = time(NULL);
-        if (current_time - last_time < period)
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+
+        if (true /** time compare **/)
             continue;
 
         last_time = current_time;
