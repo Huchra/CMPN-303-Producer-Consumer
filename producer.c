@@ -154,14 +154,13 @@ int main(int argc, char *argv[])
         int item = produce_item();
         int *buffer = shmat(shm_id, NULL, 0);
 
+        int index = semctl(count, 0, GETVAL);
+        buffer[index] = item;
+
         // print out buffer
         for (int i = 0; i < N; i++)
             printf("%d ", buffer[i]);
-
         printf("\n");
-
-        int index = semctl(count, 0, GETVAL);
-        buffer[index] = item;
 
         up(mutex);
         up(count);
