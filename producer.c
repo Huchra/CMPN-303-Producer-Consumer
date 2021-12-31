@@ -13,7 +13,8 @@ int sequence = -1;
 
 int produce_item()
 {
-    sequence = (sequence + 1) % N;
+    // sequence = (sequence + 1) % N;
+    sequence++;
     printf("Producer: Producing item %d\n", sequence);
     return sequence;
 }
